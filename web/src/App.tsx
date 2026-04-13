@@ -51,7 +51,7 @@ const SUGGESTED = [
   "Walk me through your resume and key achievements.",
   "What is your experience with RAG systems and LLMs?",
   "Tell me about the Reddit automation project and its tradeoffs.",
-  "What's your availability for an interview?",
+  "What are your core technical skills and tools?",
 ];
 
 const TIMEZONES = [

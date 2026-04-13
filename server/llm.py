@@ -4,7 +4,7 @@ import json
 import httpx
 
 from server.config import settings
-from server.rag import SYSTEM_PROMPT, format_context  # noqa: F401
+from server.rag import SYSTEM_PROMPT, VOICE_SYSTEM_PROMPT, format_context  # noqa: F401
 
 _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 _GROQ_MODEL = "llama-3.3-70b-versatile"
@@ -75,19 +75,32 @@ async def stream_groq_messages(messages: list[dict]):
                     continue
 
 
-async def stream_chat_answer(user_message: str, context: str, *, abstained: bool):
+async def stream_chat_answer(
+    user_message: str,
+    context: str,
+    *,
+    abstained: bool,
+    for_voice: bool = False,
+):
     """RAG path: build prompt from context and stream response."""
     prompt = _build_rag_prompt(user_message, context, abstained)
+    system = VOICE_SYSTEM_PROMPT if for_voice else SYSTEM_PROMPT
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system},
         {"role": "user", "content": prompt},
     ]
     async for token in stream_groq_messages(messages):
         yield token
 
 
-async def generate_chat_once(user_message: str, context: str, *, abstained: bool) -> str:
+async def generate_chat_once(
+    user_message: str,
+    context: str,
+    *,
+    abstained: bool,
+    for_voice: bool = False,
+) -> str:
     parts: list[str] = []
-    async for t in stream_chat_answer(user_message, context, abstained=abstained):
+    async for t in stream_chat_answer(user_message, context, abstained=abstained, for_voice=for_voice):
         parts.append(t)
     return "".join(parts)

@@ -68,17 +68,26 @@ def has_scheduling_intent(text: str) -> bool:
 async def execute_tool(name: str, args: dict) -> tuple[str, list | None]:
     """Execute a tool call. Returns (json_result, slots_list_or_None)."""
     if name == "get_availability":
-        slots = await calendar_calcom.fetch_slots(
-            days_ahead=14,
-            timezone_name=args.get("timezone", "UTC"),
-        )
-        if not slots:
-            result = {
+        from datetime import date, timedelta
+        tz = args.get("timezone", "UTC")
+        # Fetch slots for today + next 6 days, 9 AM–6 PM each day
+        all_slots: list = []
+        today = date.today()
+        for offset in range(7):
+            day = (today + timedelta(days=offset)).isoformat()
+            day_slots = await calendar_calcom.fetch_slots_in_window(
+                date=day,
+                start_time="09:00",
+                end_time="18:00",
+                timezone_name=tz,
+            )
+            all_slots.extend(day_slots)
+        if not all_slots:
+            return json.dumps({
                 "slots": [],
-                "message": "No slots found. Cal.com calendar is not configured on this server.",
-            }
-            return json.dumps(result), []
-        return json.dumps({"slots": slots}), slots
+                "message": "No available slots found in the next 7 days.",
+            }), []
+        return json.dumps({"slots": all_slots[:10]}), all_slots[:10]
 
     if name == "create_booking":
         result = await calendar_calcom.create_booking(

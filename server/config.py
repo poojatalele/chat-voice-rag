@@ -36,5 +36,8 @@ class Settings(BaseSettings):
     # Voice / Vapi (documented; server validates optional webhook secret)
     vapi_webhook_secret: str = ""
 
+    # Retell AI — Custom LLM webhook secret (from Retell dashboard → Agent settings)
+    retell_api_key: str = ""
+
 
 settings = Settings()
