@@ -9,8 +9,6 @@ web/dist/
 artifacts/*.csv
 .DS_Store
 *.egg-info/
-docs/
-eval/
 Scaler_AI_Persona_Implementation_Plan.md
 CLAUDE.md
 README.md
