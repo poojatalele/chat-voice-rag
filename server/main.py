@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from pathlib import Path
 from typing import AsyncIterator
@@ -239,6 +240,8 @@ async def book_slot(body: BookRequestBody):
 #   → Cal.com creates Google Meet + sends invites to both parties
 #   → we return a spoken confirmation string back to Vapi
 
+VAPI_SECRET = os.getenv("VAPI_SECRET", "")
+
 @app.post("/api/vapi/book-call")
 async def vapi_book_call(request: Request):
     """
@@ -246,6 +249,12 @@ async def vapi_book_call(request: Request):
     Finds the first available slot in the caller's preferred window and books it.
     Cal.com handles: availability check, Google Meet creation, email invites.
     """
+    # Verify request is from Vapi
+    if VAPI_SECRET:
+        secret = request.headers.get("x-vapi-secret", "")
+        if secret != VAPI_SECRET:
+            return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+
     body = await request.json()
 
     # Parse Vapi's tool-call payload
@@ -295,7 +304,11 @@ async def vapi_book_call(request: Request):
     from datetime import datetime
     try:
         dt = datetime.fromisoformat(result["start"].replace("Z", "+00:00"))
-        spoken_time = dt.strftime("%A, %B %-d at %-I:%M %p")
+        day = dt.day
+        hour = dt.hour % 12 or 12
+        minute = f"{dt.minute:02d}"
+        am_pm = "AM" if dt.hour < 12 else "PM"
+        spoken_time = f"{dt.strftime('%A, %B')} {day} at {hour}:{minute} {am_pm}"
     except Exception:
         spoken_time = result.get("start", first_slot)
 
