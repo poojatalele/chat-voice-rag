@@ -1,60 +1,105 @@
 """
-Cal.com REST integration (free tier).
-Requires CALCOM_API_KEY, CALCOM_USERNAME, CALCOM_EVENT_TYPE_ID in env.
-Docs: https://developer.cal.com/api
+Cal.com v2 REST integration — public endpoints (no auth required for guest bookings).
+
+For personal booking pages:
+  - GET  /v2/slots   → public, needs only eventTypeId
+  - POST /v2/bookings → public guest booking, needs only eventTypeId
+
+Set CALCOM_EVENT_TYPE_ID in .env (the numeric ID from your Cal.com event URL).
+Optionally set CALCOM_API_KEY for authenticated requests (personal API key from cal.com/settings/developer).
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
 from server.config import settings
 
+_V2_BASE = "https://api.cal.com/v2"
+_SLOTS_VERSION    = "2024-09-04"
+_BOOKINGS_VERSION = "2026-02-25"
 
-async def fetch_slots(
-    days_ahead: int = 14,
+
+def _is_configured() -> bool:
+    return bool(settings.calcom_event_type_id)
+
+
+def _headers(extra: dict | None = None) -> dict:
+    """Build request headers. Uses personal API key if set, otherwise anonymous."""
+    h: dict = {"Content-Type": "application/json"}
+    if settings.calcom_api_key:
+        h["Authorization"] = f"Bearer {settings.calcom_api_key}"
+    if extra:
+        h.update(extra)
+    return h
+
+
+# ── Public API ───────────────────────────────────────────────────────────────
+
+async def fetch_slots_in_window(
+    date: str,
+    start_time: str,
+    end_time: str,
     timezone_name: str = "UTC",
 ) -> list[dict[str, Any]]:
-    """Return list of {start, end} ISO strings from Cal.com slots API."""
-    if not settings.calcom_api_key or not settings.calcom_username or not settings.calcom_event_type_id:
+    """
+    Return Pooja's available slots inside the recruiter's window.
+
+    Args:
+        date:          "YYYY-MM-DD"
+        start_time:    "HH:MM"  (24-hour, in recruiter's timezone)
+        end_time:      "HH:MM"
+        timezone_name: IANA timezone string
+
+    Returns:
+        Sorted list of {"start": ISO, "end": ISO} dicts.
+    """
+    if not _is_configured():
         return []
 
-    start = datetime.now(timezone.utc)
-    end = start + timedelta(days=days_ahead)
+    try:
+        tz = ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        tz = ZoneInfo("UTC")
+
+    try:
+        start_dt = datetime.strptime(f"{date}T{start_time}", "%Y-%m-%dT%H:%M").replace(tzinfo=tz)
+        end_dt   = datetime.strptime(f"{date}T{end_time}",   "%Y-%m-%dT%H:%M").replace(tzinfo=tz)
+    except ValueError:
+        return []
+
     params = {
-        "username": settings.calcom_username,
-        "eventTypeId": settings.calcom_event_type_id,
-        "startTime": start.isoformat().replace("+00:00", "Z"),
-        "endTime": end.isoformat().replace("+00:00", "Z"),
-        "timeZone": timezone_name,
+        "eventTypeId": str(settings.calcom_event_type_id),
+        "start":       start_dt.isoformat(),
+        "end":         end_dt.isoformat(),
+        "timeZone":    timezone_name,
+        "format":      "range",
     }
-    headers = {"Authorization": f"Bearer {settings.calcom_api_key}"}
-    url = f"{settings.calcom_base_url.rstrip('/')}/slots"
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        r = await client.get(url, params=params, headers=headers)
+    hdrs = _headers({"cal-api-version": _SLOTS_VERSION})
+    # slots endpoint is public — remove auth header to avoid 401 on free accounts
+    hdrs.pop("Authorization", None)
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(f"{_V2_BASE}/slots", params=params, headers=hdrs)
         if r.status_code != 200:
             return []
         data = r.json()
-    # Response shape varies; normalize common shapes
+
     slots: list[dict[str, Any]] = []
-    if isinstance(data, dict):
-        inner = data.get("slots") or data.get("data") or {}
-        if isinstance(inner, dict):
-            for day, times in inner.items():
-                if isinstance(times, list):
-                    for t in times:
-                        if isinstance(t, str):
-                            slots.append({"start": t, "end": None})
-                        elif isinstance(t, dict):
-                            slots.append(
-                                {
-                                    "start": t.get("time") or t.get("start"),
-                                    "end": t.get("end"),
-                                }
-                            )
-    return slots[:20]
+    inner = data.get("data", {})
+    if isinstance(inner, dict):
+        for day_slots in inner.values():
+            for slot in day_slots or []:
+                if isinstance(slot, dict) and slot.get("start"):
+                    slots.append({"start": slot["start"], "end": slot.get("end")})
+                elif isinstance(slot, str):
+                    slots.append({"start": slot, "end": None})
+
+    slots.sort(key=lambda s: s["start"])
+    return slots
 
 
 async def create_booking(
@@ -63,32 +108,41 @@ async def create_booking(
     attendee_email: str,
     attendee_name: str,
     timezone_name: str,
-    notes: str = "",
 ) -> dict[str, Any]:
-    if not settings.calcom_api_key:
-        return {"ok": False, "error": "CALCOM_API_KEY not configured"}
+    """
+    Book a slot. Returns {"ok", "uid", "start", "end", "location", "status"}.
+    location is the Google Meet / video conferencing link when Cal.com generates one.
+    """
+    if not _is_configured():
+        return {"ok": False, "error": "CALCOM_EVENT_TYPE_ID not set in .env."}
 
-    payload = {
-        "eventTypeId": settings.calcom_event_type_id,
+    payload: dict[str, Any] = {
         "start": start_iso,
-        "responses": {
-            "name": attendee_name,
-            "email": attendee_email,
-            "notes": notes,
+        "eventTypeId": settings.calcom_event_type_id,
+        "attendee": {
+            "name":     attendee_name,
+            "email":    attendee_email,
+            "timeZone": timezone_name,
         },
-        "timeZone": timezone_name,
-        "language": "en",
-        "metadata": {},
     }
-    headers = {
-        "Authorization": f"Bearer {settings.calcom_api_key}",
-        "Content-Type": "application/json",
-    }
-    url = f"{settings.calcom_base_url.rstrip('/')}/bookings"
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        r = await client.post(url, json=payload, headers=headers)
+
+    hdrs = _headers({"cal-api-version": _BOOKINGS_VERSION})
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(f"{_V2_BASE}/bookings", json=payload, headers=hdrs)
         try:
             body = r.json()
         except Exception:
             body = {"raw": r.text}
-        return {"ok": r.status_code in (200, 201), "status": r.status_code, "body": body}
+
+    if r.status_code in (200, 201):
+        booking = body.get("data", {})
+        return {
+            "ok":       True,
+            "uid":      booking.get("uid"),
+            "start":    booking.get("start"),
+            "end":      booking.get("end"),
+            "location": booking.get("location"),   # video conferencing URL
+            "status":   booking.get("status"),
+        }
+    return {"ok": False, "http_status": r.status_code, "detail": body}

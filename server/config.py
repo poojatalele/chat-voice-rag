@@ -17,10 +17,10 @@ class Settings(BaseSettings):
     rerank_top_chat: int = 5
     rerank_top_voice: int = 3
 
-    # Cal.com
+    # Cal.com — personal API key (from cal.com/settings/developer/api-keys)
+    # Leave blank to use public/anonymous endpoints (works for free accounts)
     calcom_api_key: str = ""
-    calcom_base_url: str = "https://api.cal.com/v1"
-    calcom_username: str = ""
+    # Numeric event type ID (from the URL when editing your event type)
     calcom_event_type_id: int = 0
 
     # Optional: Cohere rerank
