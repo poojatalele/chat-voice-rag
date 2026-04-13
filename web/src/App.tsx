@@ -30,6 +30,21 @@ type Confirmation = { start: string; end?: string; location?: string; uid: strin
 
 const apiBase = () => (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
 
+/** 30-minute interval options for the time dropdowns */
+const TIME_OPTIONS: { label: string; value: string }[] = (() => {
+  const opts: { label: string; value: string }[] = [];
+  for (let h = 0; h < 24; h++) {
+    for (const m of [0, 30]) {
+      const hh = String(h).padStart(2, "0");
+      const mm = m === 0 ? "00" : "30";
+      const ampm = h < 12 ? "AM" : "PM";
+      const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
+      opts.push({ label: `${h12}:${mm} ${ampm}`, value: `${hh}:${mm}` });
+    }
+  }
+  return opts;
+})();
+
 const SUGGESTED = [
   "Why are you the right fit for this role?",
   "Tell me about your Blood Report Analysis project — why CrewAI?",
@@ -124,8 +139,8 @@ function BookingModal({ onClose }: { onClose: () => void }) {
 
   const [step, setStep]           = useState<BookStep>("window");
   const [date, setDate]           = useState(todayStr());
-  const [startTime, setStartTime] = useState("09:00");
-  const [endTime, setEndTime]     = useState("18:00");
+  const [startTime, setStartTime] = useState("08:00");
+  const [endTime, setEndTime]     = useState("20:00");
   const [timezone, setTimezone]   = useState(defaultTz);
   const [slots, setSlots]         = useState<Slot[]>([]);
   const [selectedSlot, setSelectedSlot] = useState<Slot | null>(null);
@@ -150,7 +165,10 @@ function BookingModal({ onClose }: { onClose: () => void }) {
       const found: Slot[] = j.slots || [];
       setSlots(found);
       setStep("slots");
-      if (!found.length) setError(`No available slots on ${date} between ${startTime}–${endTime} (${timezone}). Try a different day or wider window.`);
+      if (!found.length) setError(
+        `No available slots on ${date} between ${startTime}–${endTime} (${timezone}). ` +
+        `Pooja's calendar is in IST (UTC+5:30) — try a wider window or switch your timezone to IST.`
+      );
     } catch (e) {
       setError(String(e));
     } finally {
@@ -233,24 +251,40 @@ function BookingModal({ onClose }: { onClose: () => void }) {
 
                 <div className="grid grid-cols-2 gap-3">
                   <label className="block">
-                    <span className="text-xs font-medium text-slate-600">Available from</span>
-                    <input
-                      type="time"
-                      className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-forest/40"
+                    <span className="text-xs font-medium text-slate-600">From</span>
+                    <select
+                      className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-forest/40 bg-white"
                       value={startTime}
-                      onChange={(e) => setStartTime(e.target.value)}
-                    />
+                      onChange={(e) => {
+                        setStartTime(e.target.value);
+                        // auto-advance end if it's not after start
+                        if (e.target.value >= endTime) {
+                          const idx = TIME_OPTIONS.findIndex((o) => o.value === e.target.value);
+                          setEndTime(TIME_OPTIONS[Math.min(idx + 4, TIME_OPTIONS.length - 1)].value);
+                        }
+                      }}
+                    >
+                      {TIME_OPTIONS.map((o) => (
+                        <option key={o.value} value={o.value}>{o.label}</option>
+                      ))}
+                    </select>
                   </label>
                   <label className="block">
                     <span className="text-xs font-medium text-slate-600">Until</span>
-                    <input
-                      type="time"
-                      className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-forest/40"
+                    <select
+                      className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-forest/40 bg-white"
                       value={endTime}
                       onChange={(e) => setEndTime(e.target.value)}
-                    />
+                    >
+                      {TIME_OPTIONS.filter((o) => o.value > startTime).map((o) => (
+                        <option key={o.value} value={o.value}>{o.label}</option>
+                      ))}
+                    </select>
                   </label>
                 </div>
+                <p className="text-[11px] text-slate-400 -mt-1">
+                  Times are in your selected timezone. Pooja is in IST (UTC+5:30).
+                </p>
 
                 <label className="block">
                   <span className="text-xs font-medium text-slate-600">Your timezone</span>
