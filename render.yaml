@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: persona-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: CALCOM_API_KEY
+        sync: false
+      - key: CALCOM_USERNAME
+        sync: false
+      - key: CALCOM_EVENT_TYPE_ID
+        sync: false

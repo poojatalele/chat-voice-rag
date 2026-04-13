@@ -1,0 +1,17 @@
+.env
+chroma_data/
+__pycache__/
+*.pyc
+.venv/
+venv/
+node_modules/
+web/dist/
+artifacts/*.csv
+.DS_Store
+*.egg-info/
+docs/
+eval/
+data/
+Scaler_AI_Persona_Implementation_Plan.md
+CLAUDE.md
+README.md
