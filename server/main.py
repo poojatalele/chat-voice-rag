@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
@@ -201,3 +202,9 @@ async def voice_turn(body: VoiceTurnBody):
 @app.exception_handler(Exception)
 async def global_exc(_, exc: Exception):
     return JSONResponse(status_code=500, content={"detail": str(exc)})
+
+
+# Serve React frontend — must be LAST so API routes take priority
+_dist = Path(__file__).resolve().parents[1] / "web" / "dist"
+if _dist.exists():
+    app.mount("/", StaticFiles(directory=str(_dist), html=True), name="frontend")
