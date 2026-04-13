@@ -14,11 +14,15 @@ def _build_rag_prompt(user_message: str, context: str, abstained: bool) -> str:
     if abstained or not context.strip():
         return (
             f"User asked:\n{user_message}\n\n"
-            "There is NO relevant context in the knowledge base for this question. "
-            "Reply honestly in 2-3 sentences. If they want to schedule, tell them to ask "
-            "'What's your availability?' to see real calendar slots."
+            "There is NO relevant context retrieved for this question. "
+            "Respond honestly in 1-2 sentences. Suggest 2-3 related topics from "
+            "Pooja's background (skills, projects, experience) that you can speak to."
         )
-    return f"CONTEXT (from resume/GitHub):\n{context}\n\nUser:\n{user_message}\n\nAnswer using only CONTEXT."
+    return (
+        f"CONTEXT (retrieved from Pooja's resume and GitHub):\n{context}\n\n"
+        f"User question: {user_message}\n\n"
+        "Answer using ONLY the CONTEXT above. Be specific — use exact names, tech, metrics."
+    )
 
 
 async def groq_call(messages: list[dict], tools: list | None = None) -> dict:

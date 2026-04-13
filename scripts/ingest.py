@@ -49,26 +49,42 @@ PRIORITY_FILES = [
 ]
 
 
-def token_split(text: str, max_tokens: int = 500, overlap: int = 100) -> list[str]:
-    """Recursive-ish split by paragraphs then size (~4 chars per token)."""
-    max_chars = max_tokens * 4
+def token_split(text: str, max_tokens: int = 200, overlap: int = 40) -> list[str]:
+    """
+    Split text into focused chunks (~200 tokens / ~800 chars) with overlap.
+
+    Why 200 tokens:
+      MiniLM-L6-v2 (the local embedding model) produces cosine similarities in
+      the 0.05–0.40 range for resume-style Q&A. Long 500-token chunks dilute the
+      embedding vector across many unrelated topics, pushing all similarities toward
+      zero. 200-token chunks keep each chunk focused on one topic (education, one
+      project, one role), lifting relevant similarities to 0.25–0.50 and making the
+      threshold gate meaningful.
+
+    Overlap of 40 tokens preserves cross-paragraph context without re-embedding
+    the same information redundantly.
+    """
+    max_chars = max_tokens * 4       # ~4 chars per token
     overlap_chars = overlap * 4
     chunks: list[str] = []
     paras = re.split(r"\n\n+", text)
     buf = ""
     for p in paras:
+        if not p.strip():
+            continue
         if len(buf) + len(p) + 2 <= max_chars:
             buf = (buf + "\n\n" + p).strip() if buf else p
         else:
             if buf:
                 chunks.append(buf)
-            buf = p
+            # carry overlap into the next chunk
+            buf = buf[-overlap_chars:].strip() + "\n\n" + p if buf else p
         while len(buf) > max_chars:
             chunks.append(buf[:max_chars])
-            buf = buf[max_chars - overlap_chars :]
-    if buf:
+            buf = buf[max_chars - overlap_chars:]
+    if buf.strip():
         chunks.append(buf)
-    return [c for c in chunks if c.strip()]
+    return [c.strip() for c in chunks if c.strip()]
 
 
 def gh_headers() -> dict:
@@ -154,33 +170,108 @@ def ingest_github_repo(owner: str, repo: str) -> list[dict]:
     return docs
 
 
+_SECTION_HEADERS = re.compile(
+    r"^(Education|Experience|Projects?|Technical Skills?|Skills?|"
+    r"Certifications?|Awards?|Publications?|Interests?)$",
+    re.IGNORECASE,
+)
+
+# Bullet chars that PDFs emit (•, ◆, ▪, and PDF font substitution artifacts)
+_BULLET = re.compile(r"^[\u2022\u25c6\u25aa\uf0b7\uf0a7\uf076\u2013\-]")
+
+
+def _is_entry_title(line: str) -> bool:
+    """Heuristic: a non-bullet line that's short and title-cased → new entry."""
+    stripped = line.strip()
+    if not stripped or _BULLET.match(stripped):
+        return False
+    if _SECTION_HEADERS.match(stripped):
+        return True
+    # Project names / job titles: short, no trailing punctuation, mixed case
+    if len(stripped) < 80 and not stripped.endswith((".","?","!")) and " " in stripped:
+        return True
+    return False
+
+
 def ingest_resume(path: Path) -> list[dict]:
-    text = ""
+    """
+    Section-aware resume ingestion.
+
+    PDF extractors collapse all newlines to single \\n, so generic paragraph
+    splitting (double newline) produces only 3–6 giant chunks. This function
+    instead groups lines into logical entries (one education institution, one
+    job role, one project) so each chunk stays focused — improving MiniLM
+    embedding alignment with short queries like "where did you study?".
+    """
     if path.suffix.lower() == ".pdf":
         try:
             from pypdf import PdfReader
-
             reader = PdfReader(str(path))
-            text = "\n".join(page.extract_text() or "" for page in reader.pages)
+            raw = "\n".join(page.extract_text() or "" for page in reader.pages)
         except Exception as e:
             raise RuntimeError(f"Failed to read PDF: {e}") from e
     else:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        raw = path.read_text(encoding="utf-8", errors="replace")
 
-    docs = []
-    for idx, chunk in enumerate(token_split(text)):
-        docs.append(
-            {
+    lines = [l for l in raw.splitlines() if l.strip()]
+
+    # Group lines into logical entries separated by section headers / entry titles
+    groups: list[tuple[str, list[str]]] = []   # (section_label, lines)
+    current_section = "header"
+    current_lines: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        if _SECTION_HEADERS.match(stripped):
+            if current_lines:
+                groups.append((current_section, current_lines))
+            current_section = stripped.lower()
+            current_lines = [stripped]
+        elif _is_entry_title(stripped) and current_section not in ("header",):
+            # New entry inside a section — start a new chunk
+            if current_lines:
+                groups.append((current_section, current_lines))
+            current_lines = [stripped]
+        else:
+            current_lines.append(stripped)
+
+    if current_lines:
+        groups.append((current_section, current_lines))
+
+    # Merge consecutive groups in the same section if the first is tiny (<120 chars)
+    merged: list[tuple[str, str]] = []
+    for section, g_lines in groups:
+        text = "\n".join(g_lines).strip()
+        if not text:
+            continue
+        if merged and merged[-1][0] == section and len(merged[-1][1]) < 120:
+            merged[-1] = (section, merged[-1][1] + "\n" + text)
+        else:
+            merged.append((section, text))
+
+    # Convert each group to document chunks; further split large groups
+    docs: list[dict] = []
+    chunk_idx = 0
+    for section, text in merged:
+        # Skip chunks that are too small to be useful embeddings
+        if len(text.strip()) < 60:
+            continue
+        sub_chunks = token_split(text) if len(text) > 800 else [text]
+        for chunk in sub_chunks:
+            if len(chunk.strip()) < 60:
+                continue
+            docs.append({
                 "text": chunk,
                 "meta": {
                     "source": "resume",
                     "repo_name": "",
                     "file_path": str(path.name),
-                    "section": "resume",
-                    "chunk_index": idx,
+                    "section": section,
+                    "chunk_index": chunk_idx,
                 },
-            }
-        )
+            })
+            chunk_idx += 1
+
     return docs
 
 
