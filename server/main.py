@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -16,14 +16,7 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 from server import calendar_calcom
 from server.config import settings
-from server.llm import (
-    SYSTEM_PROMPT,
-    VOICE_SYSTEM_PROMPT,
-    generate_chat_once,
-    groq_call,
-    stream_chat_answer,
-    stream_groq_messages,
-)
+from server.llm import SYSTEM_PROMPT, generate_chat_once, groq_call, stream_chat_answer, stream_groq_messages
 from server.rag import chunks_to_citations, format_context, retrieve
 from server.tools import GROQ_TOOLS, execute_tool, has_scheduling_intent
 
@@ -45,7 +38,7 @@ async def health():
     return {"status": "ok", "service": "persona-api"}
 
 
-# ── RAG debug endpoint ────────────────────────────────────────────────────────
+# ── RAG debug ─────────────────────────────────────────────────────────────────
 
 class RetrieveBody(BaseModel):
     query: str
@@ -55,11 +48,7 @@ class RetrieveBody(BaseModel):
 
 @app.post("/rag/retrieve")
 async def rag_retrieve(body: RetrieveBody):
-    chunks, max_score = retrieve(
-        body.query,
-        for_voice=body.for_voice,
-        conversation_tail=body.conversation_tail,
-    )
+    chunks, max_score = retrieve(body.query, conversation_tail=body.conversation_tail)
     abstained = max_score < settings.similarity_threshold
     return {
         "max_score": round(max_score, 4),
@@ -75,25 +64,19 @@ async def rag_retrieve(body: RetrieveBody):
 
 async def _agent_stream(
     last_user: str,
-    history: list[dict],          # conversation WITHOUT system message
+    history: list[dict],
     *,
-    for_voice: bool = False,
     conversation_tail: str | None = None,
 ) -> AsyncIterator[tuple[str, object]]:
     """
-    Single source of truth for agent logic — used by both chat and voice.
-
-    Yields (event_type, payload) tuples:
-      ("token",  str)       — a text token to append
-      ("slots",  list)      — slot data for chat UI (suppressed in voice mode)
-      ("done",   dict)      — completion metadata {abstained, confidence, citations}
+    Core agent loop for chat. Yields (event_type, payload):
+      ("token",  str)   — text token
+      ("slots",  list)  — slot data for the chat UI slot-card component
+      ("done",   dict)  — {abstained, confidence, citations}
     """
-    system = VOICE_SYSTEM_PROMPT if for_voice else SYSTEM_PROMPT
-
     # ── Scheduling path: Groq tool calling ───────────────────────────────────
     if has_scheduling_intent(last_user):
-        messages = [{"role": "system", "content": system}] + history
-
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
         response = await groq_call(messages, tools=GROQ_TOOLS)
         assistant_msg = response["choices"][0]["message"]
         tool_calls = assistant_msg.get("tool_calls") or []
@@ -105,8 +88,7 @@ async def _agent_stream(
                 fn_args = json.loads(tc["function"]["arguments"] or "{}")
                 tool_result, slots_data = await execute_tool(fn_name, fn_args)
 
-                # Emit slot cards only for chat UI — voice lets LLM speak the JSON
-                if fn_name == "get_availability" and slots_data and not for_voice:
+                if fn_name == "get_availability" and slots_data:
                     yield ("slots", slots_data)
 
                 messages.append({
@@ -117,9 +99,7 @@ async def _agent_stream(
 
             async for token in stream_groq_messages(messages):
                 yield ("token", token)
-
         else:
-            # LLM declined tools — stream its plain text reply
             text = assistant_msg.get("content") or ""
             for word in text.split(" "):
                 yield ("token", word + " ")
@@ -127,16 +107,12 @@ async def _agent_stream(
         yield ("done", {"abstained": False, "confidence": 1.0, "citations": []})
         return
 
-    # ── RAG path: retrieve → rerank → stream ─────────────────────────────────
-    chunks, max_score = retrieve(
-        last_user, for_voice=for_voice, conversation_tail=conversation_tail
-    )
+    # ── RAG path ──────────────────────────────────────────────────────────────
+    chunks, max_score = retrieve(last_user, conversation_tail=conversation_tail)
     abstained = max_score < settings.similarity_threshold
     ctx = format_context(chunks) if not abstained else ""
 
-    async for token in stream_chat_answer(
-        last_user, ctx, abstained=abstained, for_voice=for_voice
-    ):
+    async for token in stream_chat_answer(last_user, ctx, abstained=abstained):
         yield ("token", token)
 
     yield ("done", {
@@ -155,11 +131,9 @@ class ChatMessage(BaseModel):
 
 class ChatBody(BaseModel):
     messages: list[ChatMessage] = Field(default_factory=list)
-    for_voice: bool = False
 
 
 def _parse_chat_body(messages: list[ChatMessage]) -> tuple[str, list[dict], str | None]:
-    """Return (last_user_msg, history_dicts, conversation_tail)."""
     if not messages:
         return "", [], None
     user_msgs = [m for m in messages if m.role == "user"]
@@ -167,18 +141,16 @@ def _parse_chat_body(messages: list[ChatMessage]) -> tuple[str, list[dict], str 
         return "", [], None
     last = user_msgs[-1].content
     history = [{"role": m.role, "content": m.content} for m in messages]
-    tail_parts = [f"{m.role}: {m.content}" for m in messages[-5:]]
-    tail = "\n".join(tail_parts) if len(messages) > 1 else None
+    tail = "\n".join(f"{m.role}: {m.content}" for m in messages[-5:]) if len(messages) > 1 else None
     return last, history, tail
 
 
 @app.post("/api/chat")
 async def chat_once(body: ChatBody):
-    """Non-streaming chat — RAG only (no tool calling)."""
     last, _, tail = _parse_chat_body(body.messages)
     if not last:
         raise HTTPException(400, "No user message")
-    chunks, max_score = retrieve(last, for_voice=False, conversation_tail=tail)
+    chunks, max_score = retrieve(last, conversation_tail=tail)
     abstained = max_score < settings.similarity_threshold
     ctx = format_context(chunks) if not abstained else ""
     text = await generate_chat_once(last, ctx, abstained=abstained)
@@ -198,7 +170,7 @@ async def _sse_chat(body: ChatBody) -> AsyncIterator[bytes]:
 
     yield f"event: meta\ndata: {json.dumps({'request_id': str(uuid.uuid4())})}\n\n".encode()
 
-    async for event_type, data in _agent_stream(last, history, for_voice=False, conversation_tail=tail):
+    async for event_type, data in _agent_stream(last, history, conversation_tail=tail):
         if event_type == "token":
             yield f"event: token\ndata: {json.dumps({'t': data})}\n\n".encode()
         elif event_type == "slots":
@@ -217,22 +189,19 @@ async def chat_stream_post(body: ChatBody):
     return StreamingResponse(_sse_chat(body), media_type="text/event-stream")
 
 
-# ── Calendar endpoints ────────────────────────────────────────────────────────
+# ── Calendar endpoints (used by chat UI booking modal) ────────────────────────
 
 class AvailabilityWindowBody(BaseModel):
-    date: str        # "YYYY-MM-DD"
-    start: str       # "HH:MM" in recruiter's timezone
-    end: str         # "HH:MM"
+    date: str
+    start: str
+    end: str
     timezone: str = "UTC"
 
 
 @app.post("/api/availability")
 async def get_availability(body: AvailabilityWindowBody):
     slots = await calendar_calcom.fetch_slots_in_window(
-        date=body.date,
-        start_time=body.start,
-        end_time=body.end,
-        timezone_name=body.timezone,
+        date=body.date, start_time=body.start, end_time=body.end, timezone_name=body.timezone,
     )
     return {"slots": slots, "timezone": body.timezone}
 
@@ -257,93 +226,89 @@ async def book_slot(body: BookRequestBody):
     return result
 
 
-# ── Retell AI — Custom LLM WebSocket endpoint ────────────────────────────────
+# ── Vapi Voice — book_call tool endpoint ──────────────────────────────────────
 #
-# Retell Dashboard setup (one-time):
-#   1. LLMs → Add LLM → Custom LLM
-#      WebSocket URL: wss://<your-render-app>.onrender.com/llm-websocket
-#   2. Agents → Add Agent → select that LLM → pick a voice
-#      Set interruption_sensitivity ~0.7, responsiveness ~0.8
-#   3. Phone Numbers → Buy Number → assign the agent
+# Vapi dashboard setup:
+#   1. Tools → Add Tool → Server URL: https://<your-app>.onrender.com/api/vapi/book-call
+#   2. Knowledge Base → Upload: Pooja_10151_SST.pdf
+#   3. Assistant → attach both tool + knowledge base + system prompt below
 #
-# Protocol: Retell sends JSON over WS, we stream JSON chunks back.
-# Reuses _agent_stream() — same RAG + tool-calling as chat, voice-optimized.
+# Call flow:
+#   Caller asks to schedule → Vapi LLM collects name/email/date/time
+#   → calls this endpoint → we find an available slot → book via Cal.com
+#   → Cal.com creates Google Meet + sends invites to both parties
+#   → we return a spoken confirmation string back to Vapi
 
-_VOICE_GREETING = (
-    "Hi! I'm Pooja's AI representative. I can tell you about her background, "
-    "projects, and experience, or help you schedule an interview. "
-    "What would you like to know?"
-)
-
-
-async def _send_retell(ws: WebSocket, response_id: int, content: str, complete: bool) -> None:
-    await ws.send_json({
-        "response_id": response_id,
-        "content": content,
-        "content_complete": complete,
-        "end_call": False,
-    })
-
-
-@app.websocket("/llm-websocket/{call_id}")
-async def retell_websocket(ws: WebSocket, call_id: str):
+@app.post("/api/vapi/book-call")
+async def vapi_book_call(request: Request):
     """
-    Retell Custom LLM WebSocket handler.
-    Same _agent_stream() as /api/chat/stream — no code duplication.
+    Vapi tool-call webhook for the book_call function.
+    Finds the first available slot in the caller's preferred window and books it.
+    Cal.com handles: availability check, Google Meet creation, email invites.
     """
-    await ws.accept()
+    body = await request.json()
 
-    # Retell expects the agent to speak first
-    await _send_retell(ws, 0, _VOICE_GREETING, complete=True)
+    # Parse Vapi's tool-call payload
+    tool_calls = body.get("message", {}).get("toolCalls", [])
+    if not tool_calls:
+        return JSONResponse({"results": []})
 
+    tc = tool_calls[0]
+    tool_call_id = tc.get("id", "")
+    args = tc.get("function", {}).get("arguments", {})
+    if isinstance(args, str):
+        args = json.loads(args)
+
+    name = args.get("name", "")
+    email = args.get("email", "")
+    preferred_date = args.get("preferred_date", "")
+    time_start = args.get("preferred_time_start", "09:00")
+    time_end = args.get("preferred_time_end", "18:00")
+    timezone = args.get("timezone", "UTC")
+
+    if not (name and email and preferred_date):
+        return JSONResponse({"results": [{"toolCallId": tool_call_id, "result": "Missing required information. Please provide your name, email, and preferred date."}]})
+
+    # Step 1: find available slots in the caller's window
+    slots = await calendar_calcom.fetch_slots_in_window(
+        date=preferred_date,
+        start_time=time_start,
+        end_time=time_end,
+        timezone_name=timezone,
+    )
+
+    if not slots:
+        return JSONResponse({"results": [{"toolCallId": tool_call_id, "result": f"No available slots on {preferred_date} between {time_start} and {time_end}. Ask the caller to suggest a different day or wider time window."}]})
+
+    # Step 2: book the first available slot
+    first_slot = slots[0]["start"]
+    result = await calendar_calcom.create_booking(
+        start_iso=first_slot,
+        attendee_name=name,
+        attendee_email=email,
+        timezone_name=timezone,
+    )
+
+    if not result.get("ok"):
+        return JSONResponse({"results": [{"toolCallId": tool_call_id, "result": "Booking failed. Ask the caller to try a different time slot."}]})
+
+    from datetime import datetime
     try:
-        async for raw in ws.iter_text():
-            try:
-                req = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
+        dt = datetime.fromisoformat(result["start"].replace("Z", "+00:00"))
+        spoken_time = dt.strftime("%A, %B %-d at %-I:%M %p")
+    except Exception:
+        spoken_time = result.get("start", first_slot)
 
-            interaction_type = req.get("interaction_type", "")
-            response_id = req.get("response_id", 0)
-            transcript: list[dict] = req.get("transcript", [])
+    meet = result.get("location", "")
+    meet_text = f" The Google Meet link will be in the calendar invite." if meet else ""
 
-            # update_only = live transcript update, no response needed
-            if interaction_type == "update_only":
-                continue
+    confirmation = (
+        f"Done! I've booked a 30-minute interview for {spoken_time}. "
+        f"A calendar invite has been sent to {email}.{meet_text} "
+        f"Looking forward to speaking with you!"
+    )
 
-            # Normalize Retell "agent" role → OpenAI "assistant"
-            history = [
-                {
-                    "role": "assistant" if m["role"] == "agent" else m["role"],
-                    "content": m["content"],
-                }
-                for m in transcript
-            ]
-
-            if interaction_type == "reminder_required":
-                # User went silent — inject a gentle nudge and skip full RAG
-                history.append({
-                    "role": "user",
-                    "content": "(User hasn't spoken. Ask gently if they have a question about Pooja.)",
-                })
-                last = "__reminder__"
-            else:
-                last = next(
-                    (m["content"] for m in reversed(transcript) if m["role"] == "user"),
-                    "",
-                )
-
-            # Stream response — same agent core as chat
-            async for event_type, data in _agent_stream(last, history, for_voice=True):
-                if event_type == "token":
-                    await _send_retell(ws, response_id, data, complete=False)
-                # "slots" events dropped — LLM speaks them as plain text in voice mode
-
-            # Signal turn complete
-            await _send_retell(ws, response_id, "", complete=True)
-
-    except WebSocketDisconnect:
-        pass  # caller hung up — normal exit
+    return JSONResponse({"results": [{"toolCallId": tool_call_id, "result": confirmation}]})
 
 
 # ── Exception handler ─────────────────────────────────────────────────────────
@@ -353,7 +318,7 @@ async def global_exc(_, exc: Exception):
     return JSONResponse(status_code=500, content={"detail": str(exc)})
 
 
-# ── React frontend — must be LAST so API routes take priority ─────────────────
+# ── React frontend — must be LAST ─────────────────────────────────────────────
 
 _dist = Path(__file__).resolve().parents[1] / "web" / "dist"
 if _dist.exists():
