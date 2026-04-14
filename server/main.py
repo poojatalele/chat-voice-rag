@@ -17,9 +17,8 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 from server import calendar_calcom
 from server.config import settings
-from server.llm import SYSTEM_PROMPT, generate_chat_once, groq_call, stream_chat_answer, stream_groq_messages
-from server.rag import chunks_to_citations, format_context, retrieve
-from server.tools import GROQ_TOOLS, execute_tool, has_scheduling_intent
+from server.llm import generate_chat_once, stream_chat_answer
+from server.rag import SYSTEM_PROMPT, chunks_to_citations, format_context, retrieve
 
 app = FastAPI(title="Scaler AI Persona API", version="1.0.0")
 
@@ -32,14 +31,14 @@ app.add_middleware(
 )
 
 
-# ── Health ────────────────────────────────────────────────────────────────────
+# Health
 
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "persona-api"}
 
 
-# ── RAG debug ─────────────────────────────────────────────────────────────────
+# RAG debug 
 
 class RetrieveBody(BaseModel):
     query: str
@@ -61,7 +60,7 @@ async def rag_retrieve(body: RetrieveBody):
     }
 
 
-# ── Shared agent core ─────────────────────────────────────────────────────────
+# Shared agent core
 
 async def _agent_stream(
     last_user: str,
@@ -70,45 +69,10 @@ async def _agent_stream(
     conversation_tail: str | None = None,
 ) -> AsyncIterator[tuple[str, object]]:
     """
-    Core agent loop for chat. Yields (event_type, payload):
-      ("token",  str)   — text token
-      ("slots",  list)  — slot data for the chat UI slot-card component
-      ("done",   dict)  — {abstained, confidence, citations}
+    Yields (event_type, payload):
+      ("token", str)  — text token
+      ("done",  dict) — {abstained, confidence, citations}
     """
-    # ── Scheduling path: Groq tool calling ───────────────────────────────────
-    if has_scheduling_intent(last_user):
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
-        response = await groq_call(messages, tools=GROQ_TOOLS)
-        assistant_msg = response["choices"][0]["message"]
-        tool_calls = assistant_msg.get("tool_calls") or []
-
-        if tool_calls:
-            messages.append(assistant_msg)
-            for tc in tool_calls:
-                fn_name = tc["function"]["name"]
-                fn_args = json.loads(tc["function"]["arguments"] or "{}")
-                tool_result, slots_data = await execute_tool(fn_name, fn_args)
-
-                if fn_name == "get_availability" and slots_data:
-                    yield ("slots", slots_data)
-
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc["id"],
-                    "content": tool_result,
-                })
-
-            async for token in stream_groq_messages(messages):
-                yield ("token", token)
-        else:
-            text = assistant_msg.get("content") or ""
-            for word in text.split(" "):
-                yield ("token", word + " ")
-
-        yield ("done", {"abstained": False, "confidence": 1.0, "citations": []})
-        return
-
-    # ── RAG path ──────────────────────────────────────────────────────────────
     chunks, max_score = retrieve(last_user, conversation_tail=conversation_tail)
     abstained = max_score < settings.similarity_threshold
     ctx = format_context(chunks) if not abstained else ""
@@ -123,7 +87,7 @@ async def _agent_stream(
     })
 
 
-# ── Chat endpoints ────────────────────────────────────────────────────────────
+# Chat endpoints
 
 class ChatMessage(BaseModel):
     role: str
@@ -190,7 +154,7 @@ async def chat_stream_post(body: ChatBody):
     return StreamingResponse(_sse_chat(body), media_type="text/event-stream")
 
 
-# ── Calendar endpoints (used by chat UI booking modal) ────────────────────────
+# Calendar endpoints
 
 class AvailabilityWindowBody(BaseModel):
     date: str
@@ -226,21 +190,7 @@ async def book_slot(body: BookRequestBody):
         raise HTTPException(502, detail=result)
     return result
 
-
-# ── Vapi Voice — book_call tool endpoint ──────────────────────────────────────
-#
-# Vapi dashboard setup:
-#   1. Tools → Add Tool → Server URL: https://<your-app>.onrender.com/api/vapi/book-call
-#   2. Knowledge Base → Upload: Pooja_10151_SST.pdf
-#   3. Assistant → attach both tool + knowledge base + system prompt below
-#
-# Call flow:
-#   Caller asks to schedule → Vapi LLM collects name/email/date/time
-#   → calls this endpoint → we find an available slot → book via Cal.com
-#   → Cal.com creates Google Meet + sends invites to both parties
-#   → we return a spoken confirmation string back to Vapi
-
-VAPI_SECRET = os.getenv("VAPI_SECRET", "")
+VAPI_SECRET = settings.vapi_secret
 
 @app.post("/api/vapi/book-call")
 async def vapi_book_call(request: Request):
@@ -324,14 +274,14 @@ async def vapi_book_call(request: Request):
     return JSONResponse({"results": [{"toolCallId": tool_call_id, "result": confirmation}]})
 
 
-# ── Exception handler ─────────────────────────────────────────────────────────
+# Exception handler
 
 @app.exception_handler(Exception)
 async def global_exc(_, exc: Exception):
     return JSONResponse(status_code=500, content={"detail": str(exc)})
 
 
-# ── React frontend — must be LAST ─────────────────────────────────────────────
+# React frontend — must be LAST
 
 _dist = Path(__file__).resolve().parents[1] / "web" / "dist"
 if _dist.exists():

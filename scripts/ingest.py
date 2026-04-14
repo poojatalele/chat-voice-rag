@@ -9,7 +9,6 @@ import argparse
 import base64
 import hashlib
 import json
-import os
 import re
 import sys
 from pathlib import Path
@@ -291,10 +290,6 @@ def main():
     )
     parser.add_argument("--reset", action="store_true", help="Delete collection first")
     args = parser.parse_args()
-
-    if not os.environ.get("GEMINI_API_KEY") and not settings.gemini_api_key:
-        print("Set GEMINI_API_KEY in environment or .env")
-        sys.exit(1)
 
     all_docs: list[dict] = []
     all_docs.extend(ingest_resume(args.resume))

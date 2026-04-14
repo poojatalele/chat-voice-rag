@@ -9,14 +9,22 @@ GROQ_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_availability",
-            "description": "Fetch Pooja's available interview slots from her Cal.com calendar for the next 14 days.",
+            "description": "Fetch Pooja's available interview slots from her Cal.com calendar for the next 7 days.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "timezone": {
                         "type": "string",
                         "description": "IANA timezone name e.g. 'America/New_York'. Defaults to UTC.",
-                    }
+                    },
+                    "start_time": {
+                        "type": "string",
+                        "description": "Preferred start of day window in HH:MM 24h format e.g. '09:00'. Defaults to '09:00'.",
+                    },
+                    "end_time": {
+                        "type": "string",
+                        "description": "Preferred end of day window in HH:MM 24h format e.g. '18:00'. Defaults to '18:00'.",
+                    },
                 },
                 "required": [],
             },
@@ -70,7 +78,7 @@ async def execute_tool(name: str, args: dict) -> tuple[str, list | None]:
     if name == "get_availability":
         from datetime import date, timedelta
         tz = args.get("timezone", "UTC")
-        # Fetch slots for today + next 6 days, 9 AM–6 PM each day
+        
         all_slots: list = []
         today = date.today()
         for offset in range(7):

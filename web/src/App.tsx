@@ -134,14 +134,12 @@ async function streamChat(
 // ── BookingModal ─────────────────────────────────────────────────────────────
 
 function BookingModal({ onClose }: { onClose: () => void }) {
-  const userTz = autoTz();
-  const defaultTz = TIMEZONES.find((t) => t.value === userTz) ? userTz : "UTC";
+  const timezone = "Asia/Kolkata";
 
   const [step, setStep]           = useState<BookStep>("window");
   const [date, setDate]           = useState(todayStr());
   const [startTime, setStartTime] = useState("08:00");
   const [endTime, setEndTime]     = useState("20:00");
-  const [timezone, setTimezone]   = useState(defaultTz);
   const [slots, setSlots]         = useState<Slot[]>([]);
   const [selectedSlot, setSelectedSlot] = useState<Slot | null>(null);
   const [name, setName]           = useState("");
@@ -283,25 +281,8 @@ function BookingModal({ onClose }: { onClose: () => void }) {
                   </label>
                 </div>
                 <p className="text-[11px] text-slate-400 -mt-1">
-                  Times are in your selected timezone. Pooja is in IST (UTC+5:30).
+                  Times are in IST (UTC+5:30).
                 </p>
-
-                <label className="block">
-                  <span className="text-xs font-medium text-slate-600">Your timezone</span>
-                  <select
-                    className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-forest/40 bg-white"
-                    value={timezone}
-                    onChange={(e) => setTimezone(e.target.value)}
-                  >
-                    {/* Prepend auto-detected if not in list */}
-                    {!TIMEZONES.find((t) => t.value === userTz) && (
-                      <option value={userTz}>{userTz} (detected)</option>
-                    )}
-                    {TIMEZONES.map((tz) => (
-                      <option key={tz.value} value={tz.value}>{tz.label}</option>
-                    ))}
-                  </select>
-                </label>
               </div>
 
               {error && <p className="text-xs text-red-500 bg-red-50 rounded-lg px-3 py-2">{error}</p>}

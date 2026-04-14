@@ -4,7 +4,7 @@ import json
 import httpx
 
 from server.config import settings
-from server.rag import SYSTEM_PROMPT, format_context  # noqa: F401
+from server.rag import SYSTEM_PROMPT, format_context  
 
 _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 _GROQ_MODEL = "llama-3.3-70b-versatile"

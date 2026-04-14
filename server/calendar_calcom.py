@@ -37,7 +37,6 @@ def _headers(extra: dict | None = None) -> dict:
     return h
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
 
 async def fetch_slots_in_window(
     date: str,
