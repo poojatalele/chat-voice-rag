@@ -11,4 +11,3 @@ artifacts/*.csv
 *.egg-info/
 Scaler_AI_Persona_Implementation_Plan.md
 CLAUDE.md
-README.md

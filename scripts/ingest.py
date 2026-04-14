@@ -281,7 +281,7 @@ def stable_id(meta: dict, text: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--resume", type=Path, required=True)
+    parser.add_argument("--resume", type=Path, default=Path("data/resume.pdf"))
     parser.add_argument(
         "--repos",
         type=str,
